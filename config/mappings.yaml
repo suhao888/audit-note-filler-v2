@@ -1,0 +1,540 @@
+# ============================================================
+# 精确映射 — 基于会计语义的列映射
+# 将决算套表的行/列映射到审计附注模板表格
+# ============================================================
+# 字段说明：
+#   cat:         附注类别标识（对应模板表格用途）
+#   sheet_kw:   决算套表中Sheet名称关键词（模糊匹配）
+#   table_idx:  模板中表格索引号（python-docx tables序号）
+#   tz_cols:    套表中数据列的索引列表（0-based）
+#   col_map:    列映射列表 [(套表列索引, 模板列索引, 是否百分比)]
+#   data_start: 套表数据起始行（默认为表头+1）
+#   name_strip: 行名前缀剥离列表
+#   name_exclude: 排除的套表行名关键词
+#   aggregations: 跨行聚合规则 [{target, sources, op}]
+#   section_headers: 分区标题列表（同名行按section隔离）
+#   accumulate: 跨section同名账龄行是否累加
+#   keep_empty: 全空数据行是否保留（填0）
+#   section:   前五名等section过滤关键词
+# ============================================================
+
+# ======== 资产类 ========
+
+# --- 货币资金 ---
+- cat: "货币资金-明细"
+  sheet_kw: "货币资金_原始数据"
+  table_idx: 5
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]  # 期末→C1
+    - [1, 2, false]  # 期初→C2
+
+# --- 应收票据 ---
+- cat: "应收票据-分类"
+  sheet_kw: "应收票据分类_原始数据"
+  table_idx: 13
+  # v9修复: C3=期末数→C1(期末账面余额), C6=期初数→C4(期初账面余额)
+  tz_cols: [3, 6]
+  col_map:
+    - [0, 1, false]  # 期末数→C1(期末账面余额)
+    - [1, 4, false]  # 期初数→C4(期初账面余额)
+  data_start: 6
+  # v9: 合计行聚合(票据种类→合计)
+  aggregations:
+    - target: "合计"
+      sources: ["银行承兑汇票", "商业承兑汇票"]
+      op: "sum"
+
+# --- 应收账款 ---
+- cat: "应收账款-组合(期末)"
+  sheet_kw: "应收款项计提坏账准备情况表_原始数据"
+  table_idx: 24
+  # 套表: C3=期末余额金额, C4=期末余额比例%, C5=坏账准备金额, C6=预期信用损失率, C7=账面净额
+  tz_cols: [3, 4, 5, 6, 7]
+  col_map:
+    - [0, 1, false]   # 账面余额金额 → 模板C1(金额)
+    - [1, 2, true]    # 账面余额比例% → 模板C2(比例%)  ×100
+    - [2, 3, false]   # 坏账准备金额 → 模板C3(金额)
+    - [3, 4, true]    # 预期信用损失率 → 模板C4(计提比例%)  ×100
+    - [4, 5, false]   # 账面净额 → 模板C5(账面价值)
+  name_exclude: ["其他应收"]  # v9: 排除其他应收款section
+
+- cat: "应收账款-组合(期初)"
+  sheet_kw: "应收款项计提坏账准备情况表_原始数据"
+  table_idx: 25
+  # 套表: C8=期初金额, C9=期初比例%, C10=期初坏账准备, C11=期初损失率
+  tz_cols: [8, 9, 10, 11]
+  col_map:
+    - [0, 1, false]   # 期初账面余额 → C1
+    - [1, 2, true]    # 期初比例% → C2 ×100
+    - [2, 3, false]   # 期初坏账准备 → C3
+    - [3, 4, true]    # 期初损失率 → C4 ×100
+  name_exclude: ["其他应收"]  # v9: 排除其他应收款section
+
+- cat: "应收账款-单项计提"
+  sheet_kw: "单项计提坏账准备的应收款项_原始数据"
+  table_idx: 26
+  tz_cols: [4, 5, 7]  # 账面余额, 坏账准备, 预期信用损失率
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, true]    # 损失率→C3(预期信用损失率%)
+  data_start: 5
+  name_strip: ["年末", "年初"]
+  name_exclude: ["其他应收款", "其他应收"]  # v9: 排除其他应收款section
+
+- cat: "应收账款-组合计提"
+  sheet_kw: "应收款项计提坏账准备情况表_原始数据"
+  table_idx: 27
+  tz_cols: [3, 7]  # 账面余额(期末), 账面净额(期末)
+  col_map:
+    - [0, 1, false]   # 账面余额→C1
+    - [1, 5, false]   # 账面净额→C5
+  name_exclude: ["其他应收"]  # v9: 排除其他应收款section
+
+- cat: "应收账款-前五名"
+  sheet_kw: "按欠款方归集应收及预付款项期末余额前五名_原始数据"
+  table_idx: 30
+  tz_cols: [4, 6, 7]  # 账面余额, 占比, 坏账准备
+  col_map:
+    - [0, 1, false]
+    - [1, 2, true]    # 占比→C2(比例%) ×100
+    - [2, 3, false]
+  data_start: 5
+  section: "应收账款"
+
+- cat: "应收账款-账龄"
+  sheet_kw: "应收款项计提坏账准备情况表_原始数据"
+  table_idx: 23
+  # 套表: C3=期末金额, C5=期末坏账准备, C7=期末净额
+  #       C8=期初金额, C10=期初坏账准备
+  tz_cols: [3, 5, 8, 10]
+  accumulate: true  # v9: 跨section同名账龄行累加
+  name_exclude: ["其他应收"]  # v10: 排除其他应收款section
+  col_map:
+    - [0, 1, false]   # 期末金额→C1(期末账面余额)
+    - [1, 2, false]   # 期末坏账准备→C2(期末坏账准备)
+    - [2, 3, false]   # 期初金额→C3(期初账面余额)
+    - [3, 4, false]   # 期初坏账准备→C4(期初坏账准备)
+  # v9: 跨section账龄聚合(关联方+非关联方)
+  aggregations:
+    - target: "1年以内（含1年）"
+      sources:
+        - "1年以内"
+        - "1年以内（含1年）"
+        - "其中：1年以内账龄"
+      op: "sum"
+    - target: "1-2年"
+      sources:
+        - "1-2年"
+        - "1－2年（含2年）"
+      op: "sum"
+    - target: "2-3年"
+      sources:
+        - "2-3年"
+        - "2－3年（含3年）"
+      op: "sum"
+    - target: "3年以上"
+      sources:
+        - "3年以上"
+        - "3－4年（含4年）"
+        - "4－5年（含5年）"
+        - "5年以上"
+        - "3-4年"
+        - "4-5年"
+        - "一、按单项计提坏账准备的应收账款"
+      op: "sum"
+
+# 应收账款-坏账准备收回/转回: 该司决算套表中无此数据(T28为收回转回表,不适用)
+
+# --- 预付款项 ---
+- cat: "预付款项-账龄"
+  sheet_kw: "预付款项按账龄列示_原始数据"
+  table_idx: 34
+  tz_cols: [3, 4, 5, 6]  # 期末金额, 期末比例, 期初金额, 期初比例
+  col_map:
+    - [0, 1, false]   # 期末金额→C1
+    - [1, 2, true]    # 期末比例→C2(%) ×100
+    - [2, 3, false]   # 期初金额→C3
+    - [3, 4, true]    # 期初比例→C4(%) ×100
+
+- cat: "预付款项-前五名"
+  sheet_kw: "按欠款方归集应收及预付款项期末余额前五名_原始数据"
+  table_idx: 36
+  tz_cols: [4, 6]  # 账面余额, 占比
+  col_map:
+    - [0, 1, false]
+    - [1, 2, true]
+  data_start: 5
+  section: "预付款项"
+
+# --- 其他应收款 ---
+- cat: "应收资金集中管理款"
+  sheet_kw: "应收资金集中管理款_原始数据"
+  table_idx: 39
+  tz_cols: [3, 4]  # 期末, 期初
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+  data_start: 5
+
+- cat: "其他应收款-分类"
+  sheet_kw: "其他应收款_原始数据"
+  table_idx: 40
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "其他应收款-账龄"
+  sheet_kw: "按账龄披露其他应收款项_原始数据"
+  table_idx: 45
+  # v11: 期末余额,期末坏账准备,期初余额,期初坏账准备(跳过比例列)
+  tz_cols: [3, 5, 6, 8]
+  col_map:
+    - [0, 1, false]   # 期末账面余额→C1
+    - [1, 2, false]   # 期末坏账准备→C2(金额,非比例)
+    - [2, 3, false]   # 期初账面余额→C3
+    - [3, 4, false]   # 期初坏账准备→C4(金额,非比例)
+
+- cat: "其他应收款-坏账准备变动"
+  sheet_kw: "本期计提、收回或转回的其他应收款坏账准备_原始数据"
+  table_idx: 43
+  tz_cols: [3, 6]
+  col_map:
+    - [0, 1, false]   # 期初→C1
+    - [1, 4, false]   # 期末→C4
+
+- cat: "其他应收款-前五名"
+  sheet_kw: "按欠款方归集应收及预付款项期末余额前五名_原始数据"
+  table_idx: 53
+  tz_cols: [4, 6, 7]
+  col_map:
+    - [0, 1, false]   # 账面余额→C1(债务人名称后)
+    - [1, 4, true]    # 占比→C4(%) ×100
+    - [2, 5, false]   # 坏账准备→C5
+  data_start: 5
+  section: "其他应收款"
+
+# --- 合同资产 ---
+- cat: "合同资产-情况"
+  sheet_kw: "合同资产情况_原始数据"
+  table_idx: 60
+  tz_cols: [3, 4, 5, 7]
+  col_map:
+    - [0, 1, false]
+    - [2, 2, true]
+    - [1, 3, false]
+    - [2, 4, true]
+    - [3, 5, false]
+
+# --- 固定资产 ---
+- cat: "固定资产-账面价值"
+  sheet_kw: "固定资产_原始数据"
+  table_idx: 90
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "固定资产-情况表"
+  sheet_kw: "固定资产情况_原始数据"
+  table_idx: 91
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]   # 期初余额→C1 (C2合并单元格)
+    - [1, 3, false]   # v11: 本年增加→C3 (跳过合并的C2)
+    - [2, 4, false]   # v11: 本年减少→C4 (C5合并单元格)
+    - [3, 6, false]   # v11: 期末余额→C6 (跳过合并的C5)
+  # v12: section headers — 固定资产情况表含原值/折旧/减值/账面价值4个section
+  #      每个section下资产名称重复(如"房屋及建筑物"),用section tag隔离
+  section_headers:
+    - "一、账面原值合计"
+    - "二、累计折旧合计"
+    - "三、固定资产减值准备合计"
+    - "四、固定资产账面价值合计"
+
+# --- 在建工程 ---
+- cat: "在建工程-情况"
+  sheet_kw: "在建工程情况_原始数据"
+  table_idx: 97
+  tz_cols: [3, 4, 5, 6, 7, 8]
+  col_map:
+    - [0, 2, false]
+    - [1, 3, false]
+    - [4, 4, false]
+    - [5, 6, false]
+
+# --- 使用权资产 ---
+- cat: "使用权资产-情况"
+  sheet_kw: "使用权资产情况_原始数据"
+  table_idx: 99
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+    - [3, 4, false]
+  # v12: section headers — 5节:原值/折旧/净值/减值/账面价值
+  section_headers:
+    - "一、账面原值合计"
+    - "二、累计折旧合计"
+    - "三、账面净值合计"
+    - "四、减值准备合计"
+    - "五、账面价值合计"
+
+# --- 无形资产 ---
+- cat: "无形资产-增减"
+  sheet_kw: "无形资产_原始数据"
+  table_idx: 100
+  tz_cols: [3, 4, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 4, false]
+  # v12: section headers — 无形资产含原价/摊销/减值/账面价值section
+  section_headers:
+    - "一、原价合计"
+    - "二、累计摊销额合计"
+    - "三、减值准备合计"
+    - "四、账面价值合计"
+
+# --- 长期待摊费用 ---
+- cat: "长期待摊费用"
+  sheet_kw: "长期待摊费用_原始数据"
+  table_idx: 107
+  tz_cols: [3, 4, 5]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+
+# --- 递延所得税 ---
+- cat: "递延所得税-资产/负债"
+  sheet_kw: "递延所得税资产和递延所得税负债_原始数据"
+  table_idx: 109
+  # 套表列: C3=递延所得税(期末), C4=互抵, C5=抵销后, C6=差异(期末)
+  #          C7=递延所得税(期初), C8=互抵, C9=抵销后, C10=差异(期初)
+  tz_cols: [6, 3, 10, 7]  # v11-fix: 差异在前,递延所得税在后
+  col_map:
+    - [0, 1, false]   # C6期末可抵扣差异→C1
+    - [1, 2, false]   # C3期末递延所得税资产→C2(差异×25%)
+    - [2, 3, false]   # C10期初可抵扣差异→C3
+    - [3, 4, false]   # C7期初递延所得税资产→C4(差异×25%)
+
+# ======== 负债类 ========
+
+- cat: "应付账款-账龄"
+  sheet_kw: "应付账款_原始数据"
+  table_idx: 120
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "应付职工薪酬-总表"
+  sheet_kw: "应付职工薪酬_原始数据"
+  table_idx: 128
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+    - [3, 4, false]
+
+- cat: "应付职工薪酬-短期薪酬明细"
+  sheet_kw: "应付职工薪酬_原始数据"
+  table_idx: 129
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+    - [3, 4, false]
+  name_exclude:
+    - "离职后福利"
+    - "设定提存计划"
+    - "企业年金"
+    - "失业保险"
+    - "辞退福利"
+    - "一年内到期"
+    - "一、短期薪酬"  # v9: 仅短期薪酬; v11: 排除总计数行防泄漏
+  # v9: 跨行聚合 — 套表多行→模板单行
+  aggregations:
+    - target: "其中：医疗保险费及生育保险费"
+      sources: ["基本医疗保险", "补充医疗保险", "生育保险费"]
+      op: "sum"
+    - target: "五、工会经费和职工教育经费"
+      sources: ["（五）工会经费", "（六）职工教育经费"]
+      op: "sum"
+
+- cat: "应交税费"
+  sheet_kw: "应交税费_原始数据"
+  table_idx: 131
+  tz_cols: [3, 6]  # 期初, 期末
+  col_map:
+    - [1, 1, false]   # 期末→C1
+    - [0, 2, false]   # 期初→C2
+
+- cat: "其他应付款-分类"
+  sheet_kw: "其他应付款_原始数据"
+  table_idx: 132
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+# ======== 权益类 ========
+
+- cat: "实收资本"
+  sheet_kw: "实收资本_原始数据"
+  table_idx: 159
+  tz_cols: [3, 7]
+  col_map:
+    - [0, 1, false]   # 期初→C1
+    - [1, 5, false]   # 期末→C5
+
+- cat: "盈余公积"
+  sheet_kw: "盈余公积_原始数据"
+  table_idx: 163
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+    - [3, 4, false]
+
+- cat: "未分配利润"
+  sheet_kw: "未分配利润_原始数据"
+  table_idx: 165
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+# ======== 利润表类 ========
+
+- cat: "营业收入/成本"
+  sheet_kw: "营业收入、营业成本_原始数据"
+  table_idx: 166
+  tz_cols: [3, 4, 5, 6]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+    - [3, 4, false]
+  # v11: 排除非监管业务行—主营业务小计的分拆项,重复数据
+  name_exclude: ["非监管业务"]
+
+- cat: "其他收益"
+  sheet_kw: "其他收益_原始数据"
+  table_idx: 179
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "投资收益"
+  sheet_kw: "投资收益_原始数据"
+  table_idx: 180
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "信用减值损失"
+  sheet_kw: "信用减值损失_原始数据"
+  table_idx: 183
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "资产减值损失"
+  sheet_kw: "资产减值准备情况表_原始数据"
+  table_idx: 184
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "营业外收入"
+  sheet_kw: "营业外收入_原始数据"
+  table_idx: 186
+  tz_cols: [3, 4, 5]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+
+- cat: "营业外支出"
+  sheet_kw: "营业外支出_原始数据"
+  table_idx: 188
+  tz_cols: [3, 4, 5]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+    - [2, 3, false]
+
+- cat: "所得税费用"
+  sheet_kw: "所得税费用_原始数据"
+  table_idx: 189
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+# ======== 现金流量表补充 ========
+
+- cat: "现金流量表-间接法"
+  sheet_kw: "间接法现金流量表_原始数据"
+  table_idx: 205
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "现金和现金等价物"
+  sheet_kw: "现金和现金等价物的构成_原始数据"
+  table_idx: 207
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+# ======== 期间费用 ========
+# 管理/销售/研发费用: 成本费用管理情况表的"合   计"行取数
+# 通过NAME_SYNONYMS将费用名映射到"合   计"
+
+- cat: "管理费用"
+  sheet_kw: "成本费用管理情况表_原始数据"
+  table_idx: 175
+  tz_cols: [10, 24]  # 本年=col K, 上年=col X
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "销售费用"
+  sheet_kw: "成本费用管理情况表_原始数据"
+  table_idx: 174
+  tz_cols: [12, 26]  # 本年=col M, 上年=col Z
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+  keep_empty: true  # 销售费用为0,合计行数据列为空但不跳过
+
+- cat: "研发费用"
+  sheet_kw: "成本费用管理情况表_原始数据"
+  table_idx: 176
+  tz_cols: [13, 27]  # 本年=col N, 上年=col AA
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]
+
+- cat: "财务费用"
+  sheet_kw: "利润表_原始数据"  # 财务费用不在成本费用管理表中
+  table_idx: 177
+  tz_cols: [3, 4]
+  col_map:
+    - [0, 1, false]
+    - [1, 2, false]

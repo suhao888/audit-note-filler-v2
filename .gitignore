@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+.venv/
+
+# 审计数据（敏感）
+*.xlsx
+*.xls
+*.docx
+!test_*.xlsx
+!test_*.docx
+
+# 输出文件
+_output/
+output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
