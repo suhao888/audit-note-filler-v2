@@ -10,9 +10,10 @@
     python auto_adapt.py --template 模板.docx --excel 套表.xlsx
     python auto_adapt.py --template 模板.docx --excel 套表.xlsx --output ./my_config
     python auto_adapt.py --template 模板.docx --excel 套表.xlsx --existing ./config
+    python auto_adapt.py --template 模板.docx --excel 套表.xlsx --semantic ./config  (指定语义配置目录)
 """
 
-import sys, argparse, json
+import sys, argparse, json, yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,6 +24,51 @@ from excel_profiler import ExcelProfiler
 from smart_matcher import SmartMatcher
 from config_generator import ConfigGenerator
 from data_adapter import extract_all, UnifiedData
+
+
+def load_semantic_patterns(semantic_dir: str) -> list:
+    """
+    加载语义配置并转为 SmartMatcher 认识的 table_patterns 格式。
+    语义数据中包含 key_concepts、columns、cross_check 等，
+    比 SmartMatcher 内置的 STANDARD_TABLE_PATTERNS 更精准。
+    """
+    sem_path = Path(semantic_dir)
+    sem_file = sem_path / "semantic_tables.yaml"
+    if not sem_file.exists():
+        print(f"  (语义配置不存在: {sem_file})")
+        return []
+
+    with open(sem_file, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+
+    patterns = []
+    for name, info in raw.items():
+        kw = info.get("key_concepts", [])
+        cols = info.get("columns", {})
+        note = info.get("note", "")
+        meaning = info.get("meaning", "")
+
+        # expected_cols: 从 columns 提取列名列表
+        expected_cols = list(cols.keys()) if cols else []
+
+        # row_keywords: 从 key_concepts 提取，或从 meaning 提取
+        row_keywords = list(kw) if kw else []
+
+        p = {
+            "name": name,
+            "expected_cols": expected_cols,
+            "row_keywords": row_keywords,
+            "source": "semantic",  # 标记来源
+        }
+        # 把 meaning/note 作为后备匹配线索
+        if note:
+            p["note"] = note
+        if meaning:
+            p["meaning"] = meaning
+        patterns.append(p)
+
+    print(f"  加载语义模式: {len(patterns)} 条")
+    return patterns
 
 
 def main():
@@ -37,6 +83,9 @@ def main():
         "--output", default="config_auto", help="输出配置目录 (默认: config_auto)"
     )
     parser.add_argument("--existing", help="已有 config/ 目录路径 (用于学习历史调优)")
+    parser.add_argument(
+        "--semantic", help="语义配置目录 (默认: ./config)", default="config"
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式结果")
     parser.add_argument(
         "--min-confidence",
@@ -92,9 +141,13 @@ def main():
         sys.exit(1)
     print(f"  Sheet 数量: {excel_result['num_sheets']}")
 
-    # Step 3: 智能匹配
-    print("\n[3/4] 执行智能匹配...")
-    sm = SmartMatcher()
+    # Step 3: 加载语义模式 + 智能匹配
+    print("\n[3/4] 加载语义模式...")
+    semantic_dir = args.semantic if args.semantic else "config"
+    semantic_patterns = load_semantic_patterns(semantic_dir)
+
+    print("  执行智能匹配...")
+    sm = SmartMatcher(semantic_patterns=semantic_patterns)
     match_result = sm.match(template_result, excel_result)
 
     status = match_result.get("status", "error")

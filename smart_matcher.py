@@ -480,14 +480,43 @@ class SmartMatcher:
     WEIGHT_COLUMNS = 0.30
     WEIGHT_ROWS = 0.20
 
-    def __init__(self, table_patterns: Optional[List[dict]] = None):
+    def __init__(
+        self,
+        table_patterns: Optional[List[dict]] = None,
+        semantic_patterns: Optional[List[dict]] = None,
+    ):
         """
         初始化匹配器。
 
         Args:
             table_patterns: 自定义表模式列表，默认使用 STANDARD_TABLE_PATTERNS
+            semantic_patterns: 从 semantic_tables.yaml 加载的语义模式，会与 table_patterns 合并
         """
-        self.table_patterns = table_patterns or STANDARD_TABLE_PATTERNS
+        base = table_patterns or STANDARD_TABLE_PATTERNS
+        # 合并语义模式（优先用语义模式，同名的覆盖内置模式）
+        if semantic_patterns:
+            # 建立索引：同名覆盖
+            base_by_name = {}
+            for p in base:
+                base_by_name[clean_text(p["name"])] = p
+            for sp in semantic_patterns:
+                name_key = clean_text(sp["name"])
+                if name_key in base_by_name:
+                    # 合并：语义模式中的字段覆盖内置的
+                    base_by_name[name_key].update(sp)
+                    base_by_name[name_key]["source"] = "semantic_merged"
+                else:
+                    # 新增：语义模式中定义的但内置没有的
+                    base_by_name[name_key] = sp
+            self.table_patterns = list(base_by_name.values())
+            semantic_count = len(semantic_patterns)
+            total_count = len(self.table_patterns)
+            print(
+                f"  SmartMatcher: {semantic_count} 条语义模式已合并, 总计 {total_count} 条"
+            )
+        else:
+            self.table_patterns = base
+
         # 建立模式查找索引（表名→模式）
         self._pattern_index = {}
         for p in self.table_patterns:
