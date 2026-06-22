@@ -10,9 +10,11 @@ import sys, re, pandas as pd
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor
-from config_loader import load_config  # v13: config externalized to YAML
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+# v14: Data Adapter 层 — 支持多源统一数据
+from data_adapter import UnifiedData, extract_all
 
 # ============================================================
 # 会计语义引擎 — 基于企业会计准则的知识层
@@ -1344,16 +1346,24 @@ def find_total_row(table):
     return len(table.rows) - 1
 
 
-def reconcile_with_main_statements(doc, taozhang_path):
-    """v10: 附注数据与四大主表稽核"""
+def reconcile_with_main_statements(doc, taozhang_path, unified_data=None):
+    """v14: 附注数据与四大主表稽核 (支持 UnifiedData)"""
     import pandas as pd
 
     xl = pd.ExcelFile(taozhang_path)
     checks = 0
+    ud = unified_data  # 可能为 None
 
     # 读取主表数据
     def read_bs_item(sheet_name, item_keyword):
-        """从资产负债表读取指定项目(排除'续'表)"""
+        """从资产负债表读取指定项目(排除'续'表) — 优先 UnifiedData"""
+        # v14: 先查 UnifiedData
+        if ud is not None:
+            for bs_key in ud.balance_sheet:
+                if item_keyword in bs_key.replace(" ", ""):
+                    v = ud.get_bs(bs_key, "期末")
+                    if v is not None:
+                        return v
         for s in xl.sheet_names:
             try:
                 d = s.encode("latin1").decode("gbk")
@@ -1378,7 +1388,19 @@ def reconcile_with_main_statements(doc, taozhang_path):
         return None
 
     def read_is_item_full(item_keyword):
-        """从利润表读取指定项目, 返回{本期:value, 上期:value}"""
+        """从利润表读取指定项目, 返回{本期:value, 上期:value} — 优先 UnifiedData"""
+        if ud is not None:
+            for is_key in ud.income_statement:
+                if item_keyword in is_key.replace(" ", ""):
+                    cur = ud.get_is(is_key, "本期")
+                    pri = ud.get_is(is_key, "上期")
+                    r = {}
+                    if cur is not None:
+                        r["本期"] = cur
+                    if pri is not None:
+                        r["上期"] = pri
+                    if r:
+                        return r
         for s in xl.sheet_names:
             try:
                 d = s.encode("latin1").decode("gbk")
@@ -1423,7 +1445,13 @@ def reconcile_with_main_statements(doc, taozhang_path):
         return {}
 
     def read_cf_item(item_keyword):
-        """从现金流量表读取指定项目"""
+        """从现金流量表读取指定项目 — 优先 UnifiedData"""
+        if ud is not None:
+            for cf_key in ud.cash_flow:
+                if item_keyword in cf_key.replace(" ", ""):
+                    v = ud.get_cf(cf_key, "期末")
+                    if v is not None:
+                        return v
         for s in xl.sheet_names:
             try:
                 d = s.encode("latin1").decode("gbk")
@@ -1584,10 +1612,67 @@ def reconcile_with_main_statements(doc, taozhang_path):
     return checks
 
 
-def fill_notes(taozhang_path, template_path, output_path, config_dir="config"):
-    """主函数 — v13: config加载自YAML"""
+def unified_to_tz_data(unified_data: UnifiedData, mapping: dict) -> dict:
+    """
+    从 UnifiedData 提取数据，转换为 fill_table 需要的格式。
+
+    返回 {row_name: [period0_val, period1_val, ...]}
+    其中 period 顺序由 mapping["tz_cols"] 指定：
+      0=期末, 1=期初, 2=本期, 3=上期
+
+    row_name 从 unified_data.accounts 的 key 取，
+    也支持从 balance_sheet/income_statement 取。
+    """
+    period_key = {0: "期末", 1: "期初", 2: "本期", 3: "上期"}
+    tz_cols = mapping.get("tz_cols", [0, 1])
+    result = {}
+
+    # 决定从哪个数据源查找
+    source_cats = mapping.get("source_cats", ["accounts"])
+    row_names = mapping.get("row_names")  # 如果指定了行名列表，按此顺序取
+
+    if row_names:
+        keys = row_names
+    else:
+        keys = list(unified_data.accounts.keys())
+
+    for name in keys:
+        vals = []
+        for c in tz_cols:
+            period = period_key.get(c)
+            if not period:
+                vals.append(None)
+                continue
+            v = None
+            for src in source_cats:
+                if src == "accounts":
+                    v = unified_data.get_account(name, period)
+                elif src == "balance_sheet":
+                    v = unified_data.get_bs(name, period)
+                elif src == "income_statement":
+                    v = unified_data.get_is(name, period)
+                elif src == "cash_flow":
+                    v = unified_data.get_cf(name, period)
+                if v is not None:
+                    break
+            vals.append(v)
+        if any(v is not None for v in vals):
+            result[name] = vals
+
+    # 如果有合计行在 accounts 中，移到末尾（模板预期）
+    total_names = [k for k in result if "合计" in k]
+    for tn in total_names:
+        result[tn] = result.pop(tn)
+
+    return result
+
+
+def fill_notes(
+    taozhang_path, template_path, output_path, config_dir="config", unified_data=None
+):
+    """主函数 — v14: 支持 UnifiedData（Data Adapter 层）"""
     print("=" * 70)
-    print("财务报表附注填充器 v10 — 会计语义引擎")
+    print("财务报表附注填充器 v14 — Data Adapter 版")
     print(f"套表: {Path(taozhang_path).name}")
     print(f"模板: {Path(template_path).name}")
     print("=" * 70)
@@ -1605,10 +1690,21 @@ def fill_notes(taozhang_path, template_path, output_path, config_dir="config"):
     remove_instructions(doc)
     prepare_expense_tables(doc)
 
+    # v14: 自动识别数据源
+    if unified_data is None:
+        print("\n📦 自动提取数据 (Data Adapter)...")
+        unified_data = extract_all(taozhang_path)
+        unified_data.print_summary()
+    else:
+        print(f"\n📦 使用外部 UnifiedData ({len(unified_data.accounts)} accounts)")
+
     xl = pd.ExcelFile(taozhang_path)
 
     print("\n📝 填充公司信息...")
     fill_company_info(doc, xl)
+
+    # v14: UnifiedData 传给 reconcile (替代直接的 taozhang 读取)
+    use_unified = unified_data is not None and len(unified_data.accounts) > 0
 
     stats = {
         "ok": 0,
@@ -1623,38 +1719,49 @@ def fill_notes(taozhang_path, template_path, output_path, config_dir="config"):
 
     for item in mappings:
         cat = item["cat"]
-        sheet_kw = item["sheet_kw"]
         table_idx = item["table_idx"]
-        tz_cols = item["tz_cols"]
         col_map = item["col_map"]
+        source_type = item.get("source_type", "taozhang")  # v14
 
         print(f"\n[{cat}]")
 
-        sheet_raw, sheet_decoded = find_sheet(xl, sheet_kw)
-        if not sheet_raw:
-            print(f"  ⏭ Sheet未找到: {sheet_kw}")
-            stats["no_sheet"] += 1
-            continue
+        # v14: 按 source_type 分支取数
+        if source_type == "unified":
+            data = unified_to_tz_data(unified_data, item)
+            if not data:
+                print(f"  ⏭ UnifiedData 无对应科目")
+                stats["no_data"] += 1
+                continue
+            print(f"  unified: {len(data)}行")
+        else:
+            sheet_kw = item["sheet_kw"]
+            tz_cols = item["tz_cols"]
+            sheet_raw, sheet_decoded = find_sheet(xl, sheet_kw)
+            if not sheet_raw:
+                print(f"  ⏭ Sheet未找到: {sheet_kw}")
+                stats["no_sheet"] += 1
+                continue
 
-        df = pd.read_excel(taozhang_path, sheet_name=sheet_raw, header=None)
+            df = pd.read_excel(taozhang_path, sheet_name=sheet_raw, header=None)
+            section_headers = item.get("section_headers")
+            data = extract_tz_data(
+                df,
+                tz_cols,
+                data_start=item.get("data_start"),
+                name_strip=item.get("name_strip"),
+                section=item.get("section"),
+                name_exclude=item.get("name_exclude"),
+                accumulate=item.get("accumulate", False),
+                section_headers=section_headers,
+                keep_empty=item.get("keep_empty", False),
+            )
+            if not data:
+                print(f"  ⏭ 无数据 ({sheet_decoded})")
+                stats["no_data"] += 1
+                continue
+            print(f"  {sheet_decoded}: {len(data)}行")
+
         section_headers = item.get("section_headers")
-        data = extract_tz_data(
-            df,
-            tz_cols,
-            data_start=item.get("data_start"),
-            name_strip=item.get("name_strip"),
-            section=item.get("section"),
-            name_exclude=item.get("name_exclude"),
-            accumulate=item.get("accumulate", False),
-            section_headers=section_headers,
-            keep_empty=item.get("keep_empty", False),
-        )
-        if not data:
-            print(f"  ⏭ 无数据 ({sheet_decoded})")
-            stats["no_data"] += 1
-            continue
-
-        print(f"  {sheet_decoded}: {len(data)}行")
 
         if table_idx >= len(doc.tables):
             print(f"  ❌ Table #{table_idx} 超出范围")
@@ -1828,9 +1935,14 @@ def fill_notes(taozhang_path, template_path, output_path, config_dir="config"):
     for rule in rules:
         print(f"  • {rule}")
 
-    # v10: 主表稽核
-    print(f"\n📊 四大主表稽核...")
-    bs_checks = reconcile_with_main_statements(doc, taozhang_path)
+    # v14: 主表稽核（优先用 UnifiedData）
+    print(f"\n📊 主表稽核...")
+    if use_unified:
+        bs_checks = reconcile_with_main_statements(
+            doc, taozhang_path, unified_data=unified_data
+        )
+    else:
+        bs_checks = reconcile_with_main_statements(doc, taozhang_path)
     if bs_checks:
         print(f"  ✅ 主表稽核通过: {bs_checks}项")
     else:
