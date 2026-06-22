@@ -1,6 +1,5 @@
 """
 统一数据模型 + 适配器基类
-所有数据源适配器继承 BaseAdapter，输出 UnifiedData
 """
 
 from dataclasses import dataclass, field
@@ -13,14 +12,11 @@ class UnifiedData:
     """
     统一中间数据，完全与数据源格式解耦。
 
-    accounts: {科目名: {"期末": 数值, "期初": 数值}}
-        或 {科目名: {"本期": 数值, "上期": 数值}}
-
-    balance_sheet: {科目名: {"期末": 数值, "期初": 数值}}
+    accounts:     {科目名: {"期末": 数值, "期初": 数值}}
+    balance_sheet:   {科目名: {"期末": 数值, "期初": 数值}}
     income_statement: {科目名: {"本期": 数值, "上期": 数值}}
-    cash_flow: {科目名: {"期末": 数值, "期初": 数值}}
-
-    entity: {字段名: 字符串值}
+    cash_flow:       {科目名: {"期末": 数值, "期初": 数值}}
+    entity:          {字段名: 值}
     """
 
     accounts: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -29,39 +25,61 @@ class UnifiedData:
     cash_flow: Dict[str, Dict[str, float]] = field(default_factory=dict)
     entity: Dict[str, str] = field(default_factory=dict)
 
-    source_files: List[str] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)  # 数据来源文件
+    adapters: List[str] = field(default_factory=list)  # 用到的适配器
     warnings: List[str] = field(default_factory=list)
 
     def get_account(self, name: str, period: str = "期末") -> Optional[float]:
-        """从 accounts 取科目余额"""
         if name in self.accounts and period in self.accounts[name]:
             return self.accounts[name][period]
         return None
 
     def get_bs(self, name: str, period: str = "期末") -> Optional[float]:
-        """从资产负债表取数"""
         if name in self.balance_sheet and period in self.balance_sheet[name]:
             return self.balance_sheet[name][period]
         return None
 
     def get_is(self, name: str, period: str = "本期") -> Optional[float]:
-        """从利润表取数"""
         if name in self.income_statement and period in self.income_statement[name]:
             return self.income_statement[name][period]
         return None
 
-    def get_cf(self, name: str, period: str = "期末") -> Optional[float]:
-        """从现金流量表取数"""
-        if name in self.cash_flow and period in self.cash_flow[name]:
-            return self.cash_flow[name][period]
-        return None
+    def merge(self, other: "UnifiedData"):
+        """
+        合并另一个 UnifiedData 到当前对象。
+        accounts 相加互不覆盖，主表选条目数多的保留。
+        """
+        # accounts: 同名科目不覆盖（先到先得）
+        for k, v in other.accounts.items():
+            if k not in self.accounts:
+                self.accounts[k] = dict(v)
+
+        # 主表：选条目数更多的版本
+        for field_name in ["balance_sheet", "income_statement", "cash_flow"]:
+            self_dict = getattr(self, field_name)
+            other_dict = getattr(other, field_name)
+            if len(other_dict) > len(self_dict):
+                setattr(self, field_name, dict(other_dict))
+            elif not self_dict:
+                setattr(self, field_name, dict(other_dict))
+
+        # entity: 追加缺失项
+        for k, v in other.entity.items():
+            if k not in self.entity:
+                self.entity[k] = v
+
+        self.adapters.extend(other.adapters)
+        self.sources.extend(other.sources)
+        self.warnings.extend(other.warnings)
 
     def print_summary(self):
-        """打印摘要"""
         print(f"  accounts: {len(self.accounts)} 项")
         print(f"  balance_sheet: {len(self.balance_sheet)} 项")
         print(f"  income_statement: {len(self.income_statement)} 项")
         print(f"  cash_flow: {len(self.cash_flow)} 项")
+        print(f"  entity: {len(self.entity)} 项")
+        if self.adapters:
+            print(f"  用到的适配器: {', '.join(set(self.adapters))}")
         if self.warnings:
             for w in self.warnings:
                 print(f"  WARN: {w}")
@@ -73,26 +91,18 @@ class BaseAdapter(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """适配器名称"""
         pass
 
     @abstractmethod
     def accept(self, filepath: str) -> bool:
-        """
-        判断是否能处理此文件。
-        检查 sheet 名、文件结构等。
-        """
+        """是否包含本适配器能处理的 sheet"""
         pass
 
     @abstractmethod
     def extract(self, filepath: str) -> UnifiedData:
-        """
-        提取为统一数据。
-        """
         pass
 
     def safe_float(self, v) -> Optional[float]:
-        """安全转浮点数"""
         if v is None:
             return None
         if isinstance(v, (int, float)):
