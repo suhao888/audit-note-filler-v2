@@ -25,14 +25,73 @@
                   └─────────────────────┘
 ```
 
-## 和 v1 的区别
+## 架构
 
-| | v1（原型） | v2（通用版） |
-|---|---|---|
-| 映射规则 | 硬编码在 fill_notes.py | config/*.yaml 外部配置 |
-| 换一家企业 | 改代码 | 换配置文件 |
-| 死代码 | SEMANTIC_TABLES 等未使用常量 | 已清理 |
-| 定位 | 单项目验证 | 可复用的工具框架 |
+```
+                  ┌──────────────────────────┐
+                  │  智能适配层 (新增)         │
+                  │  template_analyzer.py     │
+                  │  excel_profiler.py        │
+                  │  smart_matcher.py         │
+                  │  config_generator.py      │
+                  └──────────┬───────────────┘
+                             │ 分析后自动生成
+                  ┌──────────▼───────────────┐
+                  │  config/*.yaml            │
+                  │  外部配置文件               │
+                  └──────────┬───────────────┘
+                             │ 加载
+决算套表 Excel ──►  填充引擎  ──► 已填充附注 Word
+                    (fill_notes.py)
+```
+
+三层架构：
+- **智能适配层**：上传任意套表和模板，自动分析两边结构并生成配置文件
+- **配置层**：YAML 格式，可手动调整、按企业复用
+- **填充引擎层**：执行实际填充，不关心配置来源
+
+## 模块说明
+
+| 模块 | 功能 |
+|------|------|
+| `auto_adapt.py` | 一键入口：模板分析 + Excel 分析 + 匹配 + 配置生成 |
+| `template_analyzer.py` | 分析 Word 模板结构：表结构、行标签、列头、合计行、占位符 |
+| `excel_profiler.py` | 分析 Excel 套表：Sheet 分类、列类型识别、科目名提取 |
+| `smart_matcher.py` | 智能匹配：表名/列模式/行标签三维评分，自动生成映射关系 |
+| `config_generator.py` | 生成 YAML 配置文件 + 适配报告，支持从已有配置学习 |
+| `config_loader.py` | 运行时加载 YAML 配置 |
+| `fill_notes.py` | 填充引擎核心：行匹配、列映射、合计计算、主表稽核 |
+
+## 智能适配用法
+
+```bash
+# 安装依赖
+pip install pandas openpyxl python-docx pyyaml
+
+# 一键适配：上传模板和套表，自动生成配置
+python auto_adapt.py --template 模板路径.docx --excel 套表路径.xlsx
+
+# 指定输出目录
+python auto_adapt.py --template 模板.docx --excel 套表.xlsx --output ./my_config
+
+# 加载历史配置进行学习（适配效果逐渐提升）
+python auto_adapt.py --template 模板.docx --excel 套表.xlsx --existing ./config
+
+# 输出 JSON 格式结果
+python auto_adapt.py --template 模板.docx --excel 套表.xlsx --json
+```
+
+## 填充引擎用法
+
+```bash
+# 使用已有配置执行填充
+python fill_notes.py
+# 在 fill_notes.py 末尾修改:
+# - 决算套表路径
+# - 附注模板路径
+# - 输出路径
+# - config_dir（默认 "config"）
+```
 
 ## 配置结构
 
@@ -46,56 +105,11 @@ config/
 └── auto_sum_rules.yaml    # 合计规则/税率/稽核配置
 ```
 
-### mappings.yaml 格式示例
+## 验证状态
 
-```yaml
-- cat: "货币资金-明细"
-  sheet_kw: "货币资金_原始数据"
-  table_idx: 5
-  tz_cols: [3, 4]
-  col_map:
-    - [0, 1, false]   # 套表第0列 → 模板第1列
-    - [1, 2, false]   # 套表第1列 → 模板第2列
-
-- cat: "应收账款-账龄"
-  sheet_kw: "应收款项计提坏账准备情况表_原始数据"
-  table_idx: 23
-  tz_cols: [3, 5, 8, 10]
-  accumlate: true
-  aggregations:
-    - target: "1年以内（含1年）"
-      sources: ["1年以内", "1年以内（含1年）"]
-      op: "sum"
-```
-
-## 使用方式
-
-```bash
-# 安装依赖
-pip install pandas openpyxl python-docx pyyaml
-
-# 运行
-python fill_notes.py
-
-# 在 fill_notes.py 末尾修改:
-# - 决算套表路径
-# - 附注模板路径
-# - 输出路径
-# - config_dir（默认 "config"）
-```
-
-## 自定义适配
-
-换一家企业的套表和模板，做两件事：
-
-1. 把 config/ 目录复制一份，比如 config/other_company/
-2. 修改 config/other_company/ 里的 mappings.yaml 和 name_synonyms.yaml，把 sheet 名、列索引、行名对应关系改成新企业的
-
-然后在代码里传入 `config_dir="config/other_company"` 即可。
-
-## 已验证的能力
-
-45 张附注表自动填充，349 个单元格，33 项合计自动计算。4 项主表稽核通过（货币资金、应收账款、固定资产、营业收入）。
+- 填充引擎：45 张附注表自动填充，349 个单元格，33 项合计自动计算，4 项主表稽核通过
+- 智能适配：已完成 4 个模块开发，需用实际模板+套表验证匹配效果
+- 配置外置：mappings.yaml + name_synonyms.yaml 已从代码抽离
 
 ## License
 
